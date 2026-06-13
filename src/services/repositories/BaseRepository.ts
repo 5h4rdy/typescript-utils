@@ -10,6 +10,7 @@ export abstract class BaseRepository {
     protected async withTransaction<R>(action: (transaction: Transaction) => Promise<R>): Promise<R> {
         const transaction = TransactionManager.createTransaction(this.getDAO());
         try {
+            await transaction.begin();
             const result = await action(transaction);
             await transaction.commit();
             return result;

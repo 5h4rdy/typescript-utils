@@ -14,6 +14,27 @@ export type UndoFunction = () => Promise<any>;
 export interface Transaction {
 
     /**
+     * Begin the transaction.
+     *
+     * This method must be called (and awaited) after creating a transaction and
+     * before performing any operations within it.
+     *
+     * For PouchDB transactions this is a no-op. For TypeORM transactions this
+     * connects the query runner and starts the database transaction.
+     *
+     * @returns {Promise<void>} A Promise that resolves when the transaction has started.
+     *
+     * @example
+     * ```typescript
+     * const tx = TransactionManager.createTransaction(dao);
+     * await tx.begin();
+     * // ... perform operations ...
+     * await tx.commit();
+     * ```
+     */
+    begin(): Promise<void>;
+
+    /**
      * Register an undo function to the transaction.
      *
      * This method is used for registering a function that will undo a specific operation if the transaction is rolled back.
@@ -104,6 +125,14 @@ export class TransactionManager {
 export class PouchTransaction implements Transaction {
     private undoFunctions: UndoFunction[] = [];
 
+    /**
+     * No-op for PouchDB — PouchDB does not have native transaction support.
+     * Compensation-based undo functions are used instead.
+     */
+    begin(): Promise<void> {
+        return Promise.resolve();
+    }
+
     registerUndo(undoFunction: UndoFunction) {
         this.undoFunctions.push(undoFunction);
     }
@@ -132,14 +161,23 @@ export class PouchTransaction implements Transaction {
 
 export class TypeORMTransactionWrapper implements Transaction {
     private undoFunctions: UndoFunction[] = [];
+    private started = false;
 
     constructor(public readonly queryRunner: QueryRunner) {
-        this.start().catch(async error => {
-            if (this.queryRunner) {
-                await this.queryRunner.release();
-            }
+    }
+
+    async begin(): Promise<void> {
+        if (this.started) {
+            throw createError(ErrorType.DatabaseError, 'Transaction has already been started');
+        }
+        try {
+            await this.queryRunner.connect();
+            await this.queryRunner.startTransaction();
+            this.started = true;
+        } catch (error: any) {
+            await this.queryRunner.release();
             throw createError(ErrorType.DatabaseError, 'Failed to start transaction:', error);
-        });
+        }
     }
 
     registerUndo(undoFunction: UndoFunction) {
@@ -175,11 +213,6 @@ export class TypeORMTransactionWrapper implements Transaction {
         } else {
             return Promise.resolve();
         }
-    }
-
-    private async start() {
-        await this.queryRunner.connect();
-        await this.queryRunner.startTransaction();
     }
 
 }
