@@ -60,6 +60,7 @@ transaction are atomic and consistent.
 
 #### Methods
 
+- `begin()`: Begins the transaction. Must be called (and awaited) before performing any operations within the transaction.
 - `registerUndo(undoFunction: UndoFunction)`: Registers an undo function that will be called if the transaction needs to be rolled back.
 - `rollback()`: Rolls back the transaction, reverting all the operations performed during the transaction.
 - `commit()`: Commits the transaction, making all the operations permanent.
@@ -86,7 +87,7 @@ The `GenericOrmDAO` class provides a set of CRUD operations using TypeORM as the
 #### Fields
 
 - `repository`: TypeORM repository for the entity.
-- `mutex`: Mutex for synchronizing operations like `getNextSequenceId`.
+- `mutex`: Mutex (via `async-mutex`) for synchronizing operations like `getNextSequenceId`.
 
 #### Methods
 
@@ -166,6 +167,125 @@ Defines the structure for documents that can be stored in PouchDB.
 Defines a method for retrieving the entity type.
 
 - `getEntityType(): string`: Returns the entity type.
+
+___
+
+## DAOFactory
+
+The `DAOFactory` provides a single entry point for creating DAO instances regardless of the underlying backend.
+
+Business logic code never needs to change when swapping between PouchDB and TypeORM — only the factory
+configuration changes at application startup.
+
+### `DAOFactory.create<D>(config: DAOConfig): GenericDAO<D>`
+
+Creates a DAO instance based on the provided configuration. The concrete type returned depends on the
+`backend` field:
+
+- `"pouchdb"` → `GenericPouchDAO<GenericPouchDoc>`
+- `"typeorm"` → `GenericOrmDAO<GenericOrmDoc>`
+
+### Configuration (`DAOConfig`)
+
+| Field            | Backend     | Description                                      |
+|------------------|-------------|--------------------------------------------------|
+| `backend`        | Both        | `"pouchdb"` or `"typeorm"`                      |
+| `mapper`         | Both        | The mapper implementation to use                  |
+| `appVersion`     | Both        | Application version stored on created docs        |
+| `pouchDb`        | PouchDB     | A PouchDB database instance                       |
+| `entityType`     | PouchDB     | Entity type string for document namespacing        |
+| `entity`         | TypeORM     | The entity class constructor                      |
+| `entityManager`  | TypeORM     | A TypeORM EntityManager (optional with dataSource) |
+| `dataSource`     | TypeORM     | A TypeORM DataSource (optional with entityManager)  |
+
+### Example: PouchDB
+
+```typescript
+import PouchDB from "pouchdb";
+import {DAOFactory, GenericPouchMapper} from "typescript-utils";
+
+const dao = DAOFactory.create({
+    backend: "pouchdb",
+    mapper: new GenericPouchMapper(),
+    appVersion: "1.0.0",
+    pouchDb: new PouchDB("mydb"),
+    entityType: "User"
+});
+```
+
+### Example: TypeORM (SQLite)
+
+```typescript
+import {DataSource} from "typeorm";
+import {DAOFactory, GenericOrmMapper} from "typescript-utils";
+
+const dataSource = new DataSource({
+    type: "sqlite",
+    database: "./app.db",
+    entities: [User],
+    synchronize: true
+});
+await dataSource.initialize();
+
+const dao = DAOFactory.create({
+    backend: "typeorm",
+    mapper: new GenericOrmMapper(),
+    appVersion: "1.0.0",
+    entity: User,
+    dataSource
+});
+```
+
+### Swapping Backends
+
+Because both DAO implementations share the `GenericDAO` interface, the same business logic runs
+unchanged against either backend:
+
+```typescript
+// Configuration at startup — everything else is backend-agnostic
+const dao = usePouch
+    ? DAOFactory.create({backend: "pouchdb", ...})
+    : DAOFactory.create({backend: "typeorm", ...});
+
+// This code is identical regardless of backend
+const [created] = await dao.create(doc);
+const found = await dao.findByField("email", "alice@example.com");
+await dao.delete(created._id!);
+```
+
+___
+
+## BaseRepository
+
+The `BaseRepository` abstract class provides a `withTransaction` helper for any repository that
+manages a DAO. Extend it, implement `getDAO()`, and get automatic transaction lifecycle management:
+
+```typescript
+import {BaseRepository} from "typescript-utils";
+
+class UserRepository extends BaseRepository {
+    private dao: GenericDAO<User>;
+
+    constructor(dao: GenericDAO<User>) {
+        super();
+        this.dao = dao;
+    }
+
+    protected getDAO() { return this.dao; }
+
+    async createUser(name: string, email: string) {
+        return this.withTransaction(async (tx) => {
+            return this.dao.create({name, email} as User, tx);
+        });
+    }
+}
+```
+
+`withTransaction` automatically:
+1. Creates a transaction and calls `begin()`
+2. Executes your action within the transaction
+3. Commits on success
+4. Rolls back and rethrows on failure
 
 ___
 

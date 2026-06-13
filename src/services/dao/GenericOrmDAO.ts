@@ -1,4 +1,5 @@
 import {EntityManager, OptimisticLockVersionMismatchError, QueryRunner, Repository} from "typeorm";
+import {Mutex} from "async-mutex";
 import {createError, ErrorType} from "../../errors/Errors";
 import {DateUtils} from "../../utils/DateUtils";
 import {StringUtils} from "../../utils/StringUtils";
@@ -9,7 +10,7 @@ import {GenericMapper} from "./mapper/GenericMapper";
 
 export class GenericOrmDAO<D extends GenericOrmDoc> implements GenericDAO<D> {
     protected readonly repository: Repository<D>;
-    private mutex: Mutex = new Mutex();
+    private readonly mutex = new Mutex();
 
     constructor(
         private readonly entity: new () => D,
@@ -81,7 +82,7 @@ export class GenericOrmDAO<D extends GenericOrmDoc> implements GenericDAO<D> {
         for (let retries = 0; retries < maxRetries; retries++) {
             let counterDoc;
 
-            const unlock = await this.mutex.lock();
+            const release = await this.mutex.acquire();
             try {
                 try {
                     counterDoc = await this.repository.manager
@@ -110,7 +111,7 @@ export class GenericOrmDAO<D extends GenericOrmDoc> implements GenericDAO<D> {
                     throw createError(ErrorType.DatabaseUpdateError, `Failed to update counter doc ${counterDocId}`, error);
                 }
             } finally {
-                unlock();
+                release();
             }
         }
 
@@ -140,27 +141,5 @@ export class GenericOrmDAO<D extends GenericOrmDoc> implements GenericDAO<D> {
 
     getMapper(): GenericMapper {
         return this.mapper;
-    }
-}
-
-class Mutex {
-    private mutex = Promise.resolve();
-
-    lock(): PromiseLike<() => void> {
-        // noinspection JSUnusedLocalSymbols
-        let begin: (unlock: () => void) => void = unlock => {
-        };
-
-        this.mutex = this.mutex.then(() => {
-            return new Promise(begin);
-        });
-
-        return new Promise(res => {
-            begin = res;
-        });
-    }
-
-    unlock() {
-        this.mutex = Promise.resolve();
     }
 }

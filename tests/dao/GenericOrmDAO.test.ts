@@ -162,6 +162,7 @@ describe('GenericOrmDAO with Transactions', () => {
 
     it('rolls back a document creation', async () => {
         const transaction = TransactionManager.createTransaction(genericDAO);
+        await transaction.begin();
         const doc = new ExampleDoc();
         doc.name = "ToBeRolledBack";
         doc.value = 'Initial Value';
@@ -186,6 +187,7 @@ describe('GenericOrmDAO with Transactions', () => {
         const [createdDoc] = await genericDAO.create(initialDoc);
 
         const transaction = TransactionManager.createTransaction(genericDAO);
+        await transaction.begin();
         createdDoc.value = 'Updated Value';
         const [savedDoc] = await genericDAO.update(createdDoc, transaction);
         expect(savedDoc.value).toBe('Updated Value');
@@ -204,6 +206,7 @@ describe('GenericOrmDAO with Transactions', () => {
         doc.name = "ToBeDeleted";
         doc.value = 'Initial Value';
         const saveTransaction = TransactionManager.createTransaction(genericDAO);
+        await saveTransaction.begin();
         const [createdDoc] = await genericDAO.create(doc, saveTransaction);
 
         let allDocs = await genericDAO.getAll();
@@ -211,6 +214,7 @@ describe('GenericOrmDAO with Transactions', () => {
         await saveTransaction.commit();
 
         const deleteTransaction = TransactionManager.createTransaction(genericDAO);
+        await deleteTransaction.begin();
         await genericDAO.delete(createdDoc._id!, deleteTransaction);
 
         allDocs = await genericDAO.getAll();
@@ -240,6 +244,7 @@ describe('GenericOrmDAO with Transactions', () => {
         createdDoc1.value = 'Updated Value';
 
         const transaction = TransactionManager.createTransaction(genericDAO);
+        await transaction.begin();
         const [savedDoc] = await genericDAO.update(createdDoc1, transaction);
         await genericDAO.delete(createdDoc2._id!, transaction);
         expect(savedDoc.value).toBe('Updated Value');

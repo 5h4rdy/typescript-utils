@@ -256,6 +256,7 @@ describe("Transactions work identically across backends", () => {
 
         try {
             const tx = TransactionManager.createTransaction(dao);
+            await tx.begin();
             const doc = new UserOrmDoc();
             doc.name = "Temp";
             doc.email = "temp@test.com";

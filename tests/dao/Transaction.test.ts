@@ -44,8 +44,7 @@ describe("TransactionManager", () => {
         const dao = new GenericOrmDAO<SimpleOrmDoc>(SimpleOrmDoc, new GenericOrmMapper(), ds.manager, "1.0.0");
         const tx = TransactionManager.createTransaction(dao);
         expect(tx).toBeInstanceOf(TypeORMTransactionWrapper);
-        // The constructor calls start() asynchronously; give it time to settle
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await tx.begin();
         await tx.release();
         await ds.destroy();
     });
@@ -163,8 +162,7 @@ describe("TypeORMTransactionWrapper", () => {
 
     it("supports commit lifecycle", async () => {
         const tx = TransactionManager.createTransaction(dao);
-        // Allow the async start() in the constructor to settle
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await tx.begin();
 
         const doc = new SimpleOrmDoc();
 
@@ -177,8 +175,7 @@ describe("TypeORMTransactionWrapper", () => {
 
     it("supports rollback lifecycle", async () => {
         const tx = TransactionManager.createTransaction(dao);
-        // Allow the async start() in the constructor to settle
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await tx.begin();
 
         const doc = new SimpleOrmDoc();
 
