@@ -13,6 +13,7 @@ import {
     MigrationWarningEntry,
 } from "./MigrationResult";
 import {MigrationTransformer} from "./MigrationTransformer";
+import {SchemaMappingRegistry, MigrationDirection} from "./SchemaMapping";
 
 /**
  * A generic data migration pump that transfers data between any two
@@ -26,6 +27,13 @@ import {MigrationTransformer} from "./MigrationTransformer";
  * - Incremental migrations (migrateSince)
  * - Configurable on-error strategies (abort, skip, retry)
  * - Pluggable transformations
+ * - SchemaMapping support for type-aware, bidirectional migration
+ * - Sub-document extraction (nested objects → separate tables)
+ *
+ * The pump works through the GenericDAO interface, so it is inherently
+ * bidirectional: any DAO can be a source or target. The SchemaMapping
+ * registry adds type-awareness on top, enabling field-level transforms,
+ * sub-document extraction, and docType-to-entity routing.
  */
 export class DataMigrationPump {
     private readonly options: ReturnType<typeof normaliseOptions>;
@@ -81,7 +89,9 @@ export class DataMigrationPump {
         const startTime = Date.now();
         const errors: MigrationErrorEntry[] = [];
         const warnings: MigrationWarningEntry[] = [];
-        const transformer = MigrationTransformer.fromEntityType(et);
+
+        // Build transformer: SchemaMapping-aware if available, else from EntityTypeTransform
+        const transformer = this.buildTransformer(et);
 
         // 1. Extract
         let sourceRecords: Record<string, any>[];
@@ -111,78 +121,142 @@ export class DataMigrationPump {
         let failedCount = 0;
         let warningCount = 0;
 
+        // Determine if sub-document handling is needed
+        const hasSubDocuments = this.hasSubDocumentSupport(et);
+
         // 2. Process in batches
         const batchSize = this.options.batchSize;
         for (let i = 0; i < sourceRecords.length; i += batchSize) {
             const batch = sourceRecords.slice(i, i + batchSize);
 
-            // Transform
-            let transformed: Record<string, any>[];
-            try {
-                const [t, w] = await transformer.transformBatch(batch);
-                transformed = t;
-                warnings.push(...w);
-                warningCount += w.length;
-            } catch (err: any) {
-                for (const rec of batch) {
-                    errors.push({
-                        recordId: rec["_id"] ?? rec["id"],
-                        entityType: et.entityType,
-                        message: `Transform error: ${err.message}`,
-                        phase: "transform",
-                    });
-                }
-                failedCount += batch.length;
-
-                if (this.options.onError === "abort") break;
-                continue;
-            }
-
-            // Load (skip if dry run)
-            if (!this.options.dryRun) {
-                for (let j = 0; j < transformed.length; j++) {
-                    const record = transformed[j];
-                    const sourceId = batch[j]["_id"] ?? batch[j]["id"] ?? record["id"];
+            if (hasSubDocuments) {
+                // Sub-document aware path
+                for (let j = 0; j < batch.length; j++) {
+                    const record = batch[j];
+                    const sourceId = record["_id"] ?? record["id"];
 
                     try {
-                        const loaded = await this.loadSingle(et.targetDAO, record);
-                        if (loaded._id || loaded.id) {
-                            loadedIds.push({
-                                entityType: et.entityType,
-                                id: (loaded._id ?? loaded.id) as string,
-                            });
+                        const result = await transformer.transformWithSubDocuments(record, et.entityType);
+                        warnings.push(...result.warnings);
+                        warningCount += result.warnings.length;
+
+                        if (!this.options.dryRun) {
+                            // Load main record
+                            const loaded = await this.loadSingle(et.targetDAO, result.record);
+                            const loadedId = loaded._id ?? loaded.id;
+                            if (loadedId) {
+                                loadedIds.push({entityType: et.entityType, id: loadedId});
+                            }
+                            migratedCount++;
+
+                            // Load sub-documents
+                            if (result.subDocuments && et.subDocumentDAOs) {
+                                for (const sub of result.subDocuments) {
+                                    const subDAO = et.subDocumentDAOs.get(sub.entityType);
+                                    if (!subDAO) {
+                                        warnings.push({
+                                            recordId: sourceId,
+                                            entityType: et.entityType,
+                                            message: `No DAO registered for sub-document type: ${sub.entityType}`,
+                                        });
+                                        continue;
+                                    }
+                                    for (const subRec of sub.records) {
+                                        // Update FK to actual loaded ID
+                                        subRec[sub.foreignKeyField] = loadedId;
+                                        const subLoaded = await this.loadSingle(subDAO, subRec);
+                                        const subLoadedId = subLoaded._id ?? subLoaded.id;
+                                        if (subLoadedId) {
+                                            loadedIds.push({entityType: sub.entityType, id: subLoadedId});
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            migratedCount++;
                         }
-                        migratedCount++;
                     } catch (err: any) {
                         errors.push({
                             recordId: sourceId,
                             entityType: et.entityType,
-                            message: `Load error: ${err.message}`,
+                            message: `Transform/Load error: ${err.message}`,
                             cause: err.parentError?.message,
-                            phase: "load",
+                            phase: "transform",
                         });
                         failedCount++;
 
                         if (this.options.onError === "abort") break;
+                    }
+                }
+            } else {
+                // Standard batch transform path (original logic)
+                let transformed: Record<string, any>[];
+                try {
+                    const [t, w] = await transformer.transformBatch(batch);
+                    transformed = t;
+                    warnings.push(...w);
+                    warningCount += w.length;
+                } catch (err: any) {
+                    for (const rec of batch) {
+                        errors.push({
+                            recordId: rec["_id"] ?? rec["id"],
+                            entityType: et.entityType,
+                            message: `Transform error: ${err.message}`,
+                            phase: "transform",
+                        });
+                    }
+                    failedCount += batch.length;
 
-                        if (this.options.onError === "retry") {
-                            const retried = await this.retryLoad(et.targetDAO, record, sourceId, et.entityType);
-                            if (retried.success) {
-                                migratedCount++;
-                                failedCount--;
-                                if (retried.loadedId) {
-                                    loadedIds.push({entityType: et.entityType, id: retried.loadedId});
+                    if (this.options.onError === "abort") break;
+                    continue;
+                }
+
+                // Load (skip if dry run)
+                if (!this.options.dryRun) {
+                    for (let j = 0; j < transformed.length; j++) {
+                        const record = transformed[j];
+                        const sourceId = batch[j]["_id"] ?? batch[j]["id"] ?? record["id"];
+
+                        try {
+                            const loaded = await this.loadSingle(et.targetDAO, record);
+                            if (loaded._id || loaded.id) {
+                                loadedIds.push({
+                                    entityType: et.entityType,
+                                    id: (loaded._id ?? loaded.id) as string,
+                                });
+                            }
+                            migratedCount++;
+                        } catch (err: any) {
+                            errors.push({
+                                recordId: sourceId,
+                                entityType: et.entityType,
+                                message: `Load error: ${err.message}`,
+                                cause: err.parentError?.message,
+                                phase: "load",
+                            });
+                            failedCount++;
+
+                            if (this.options.onError === "abort") break;
+
+                            if (this.options.onError === "retry") {
+                                const retried = await this.retryLoad(et.targetDAO, record, sourceId, et.entityType);
+                                if (retried.success) {
+                                    migratedCount++;
+                                    failedCount--;
+                                    if (retried.loadedId) {
+                                        loadedIds.push({entityType: et.entityType, id: retried.loadedId});
+                                    }
+                                } else {
+                                    errors.push(...retried.errors);
                                 }
-                            } else {
-                                errors.push(...retried.errors);
                             }
                         }
                     }
-                }
 
-                if (this.options.onError === "abort" && failedCount > 0) break;
-            } else {
-                migratedCount += transformed.length;
+                    if (this.options.onError === "abort" && failedCount > 0) break;
+                } else {
+                    migratedCount += transformed.length;
+                }
             }
 
             // Report progress
@@ -208,6 +282,41 @@ export class DataMigrationPump {
             warnings,
             durationMs: Date.now() - startTime,
         };
+    }
+
+    /**
+     * Build the appropriate transformer for an entity type.
+     * Uses SchemaMapping if available, otherwise falls back to EntityTypeTransform config.
+     */
+    private buildTransformer(et: EntityTypeTransform): MigrationTransformer {
+        if (this.options.schemaMappings && et.schemaMappingKey) {
+            const direction = this.options.direction ?? this.inferDirection(et);
+            return MigrationTransformer.fromRegistry(
+                this.options.schemaMappings,
+                et.schemaMappingKey,
+                direction,
+            );
+        }
+        return MigrationTransformer.fromEntityType(et);
+    }
+
+    /**
+     * Infer migration direction from DAO types.
+     */
+    private inferDirection(et: EntityTypeTransform): MigrationDirection {
+        const sourceName = et.sourceDAO.constructor.name;
+        if (sourceName.includes("Pouch")) return "pouch-to-orm";
+        return "orm-to-pouch";
+    }
+
+    /**
+     * Check if the entity type has sub-document support configured.
+     */
+    private hasSubDocumentSupport(et: EntityTypeTransform): boolean {
+        if (!this.options.schemaMappings || !et.schemaMappingKey) return false;
+        const mapping = this.options.schemaMappings.getByKey(et.schemaMappingKey);
+        if (!mapping || !mapping.subDocuments || mapping.subDocuments.length === 0) return false;
+        return et.subDocumentDAOs !== undefined && et.subDocumentDAOs.size > 0;
     }
 
     /**
@@ -282,13 +391,25 @@ export class DataMigrationPump {
         }
 
         let count = 0;
+
+        // Build a lookup of entity type → DAO (includes sub-document DAOs)
+        const daoMap = new Map<string, GenericDAO<any>>();
         for (const et of this.options.entityTypes) {
-            const ids = byEntity.get(et.entityType);
-            if (!ids || ids.length === 0) continue;
+            daoMap.set(et.entityType, et.targetDAO);
+            if (et.subDocumentDAOs) {
+                for (const [subType, subDAO] of et.subDocumentDAOs) {
+                    daoMap.set(subType, subDAO);
+                }
+            }
+        }
+
+        for (const [entityType, ids] of byEntity) {
+            const dao = daoMap.get(entityType);
+            if (!dao) continue;
 
             for (const id of ids) {
                 try {
-                    await et.targetDAO.delete(id);
+                    await dao.delete(id);
                     count++;
                 } catch {
                     // Best-effort rollback

@@ -395,3 +395,277 @@ The `DateUtils` class provides various utility methods for handling dates in ISO
 - `isFuture(date: Date)`: Checks if the date is in the future.
 - `diffInDays(date1: Date, date2: Date)`: Returns the difference in days between two dates.
 
+___
+
+# Data Migration
+
+The Data Migration module provides a generic, bidirectional pump for transferring data between any two `GenericDAO` implementations. Because the pump
+works through the `GenericDAO` interface, it is inherently bidirectional — any DAO can be a source or target. The `SchemaMapping` registry adds
+type-awareness on top for complex migrations.
+
+## Architecture Overview
+
+```
+┌─────────────┐     extract      ┌───────────────┐     transform     ┌──────────────┐     load      ┌─────────────┐
+│  Source DAO  │ ──────────────► │  Extracted     │ ────────────────► │ Transformed  │ ────────────► │  Target DAO │
+│ (Pouch/ORM)  │                 │  Records       │                   │  Records      │               │ (ORM/Pouch) │
+└─────────────┘                 └───────────────┘                   └──────────────┘               └─────────────┘
+                                        │                                     │
+                                        │  migrateSince filter                │  SchemaMapping:
+                                        │  strip metadata                     │  - field transforms
+                                        │                                     │  - type converters
+                                        │                                     │  - sub-document extraction
+                                        │                                     │  - custom transforms
+```
+
+## DataMigrationPump
+
+The main migration engine. Features:
+
+- **Batch processing** with configurable batch size
+- **Dry-run mode** for testing without writing
+- **Rollback on failure** (deletes already-loaded records)
+- **Progress reporting** via callback
+- **Incremental migrations** (`migrateSince`)
+- **Configurable error strategies**: abort, skip, or retry
+- **Pluggable transformations** via `MigrationTransformer`
+- **SchemaMapping support** for type-aware, bidirectional migration
+- **Sub-document extraction** (nested objects → separate tables)
+
+### Basic Usage
+
+```typescript
+import {DataMigrationPump} from "typescript-utils";
+
+const pump = new DataMigrationPump({
+    entityTypes: [{
+        entityType: "User",
+        sourceDAO: pouchDAO,  // any GenericDAO
+        targetDAO: ormDAO,    // any GenericDAO
+    }],
+    batchSize: 100,
+    onError: "skip",
+});
+
+const result = await pump.run();
+console.log(`Migrated ${result.totalMigrated} of ${result.totalSourceRecords} records`);
+```
+
+### With Field Mapping and Custom Transforms
+
+```typescript
+const pump = new DataMigrationPump({
+    entityTypes: [{
+        entityType: "User",
+        sourceDAO,
+        targetDAO,
+        fieldMappings: [
+            {sourceField: "firstName", targetField: "givenName"},
+            {sourceField: "lastName", targetField: "familyName"},
+        ],
+        customTransform: (record) => ({
+            ...record,
+            fullName: `${record.givenName} ${record.familyName}`,
+        }),
+    }],
+});
+```
+
+## SchemaMapping — Bidirectional Type-Aware Migration
+
+For complex migrations involving field name changes, type conversions, sub-document extraction, or inheritance patterns,
+the `SchemaMappingRegistry` provides an explicit wiring specification.
+
+### Key Concept: The Pump is Already Bidirectional
+
+The existing pump works through the `GenericDAO` interface — any DAO can be a source or target. You don't need a separate
+"reverse pump." The `SchemaMapping` layer adds type-awareness on top:
+
+- **PouchDB → SQLite**: Use `direction: "pouch-to-orm"` with forward transforms
+- **SQLite → PouchDB**: Use `direction: "orm-to-pouch"` with reverse transforms
+- **PouchDB → PouchDB**: Works without SchemaMapping (simple 1:1)
+
+### Creating a SchemaMapping
+
+```typescript
+import {SchemaMappingRegistry, SchemaMapping} from "typescript-utils";
+
+const registry = new SchemaMappingRegistry([
+    {
+        key: "Tester",
+        pouchDocTypes: ["tester", "tester_legacy"],  // Multiple docTypes → one entity
+        ormEntityName: "TesterEntity",
+        stripFields: ["_id", "_rev", "appVersion", "docType"],
+
+        forward: {  // PouchDB → SQLite
+            fieldTransforms: [
+                {sourceField: "fullName", targetField: "name"},
+                {sourceField: "emailAddress", targetField: "email"},
+                {sourceField: "createdAt", targetField: "createdDate", convert: "stringToDate"},
+            ],
+            customTransform: (record) => ({...record, migratedAt: new Date().toISOString()}),
+        },
+
+        reverse: {  // SQLite → PouchDB
+            fieldTransforms: [
+                {sourceField: "name", targetField: "fullName"},
+                {sourceField: "email", targetField: "emailAddress"},
+                {sourceField: "createdDate", targetField: "createdAt", convert: "dateToString"},
+            ],
+        },
+    },
+]);
+```
+
+### Using SchemaMapping with the Pump
+
+```typescript
+const pump = new DataMigrationPump({
+    entityTypes: [{
+        entityType: "Tester",
+        sourceDAO: pouchDAO,
+        targetDAO: ormDAO,
+        schemaMappingKey: "Tester",  // references the registry key
+    }],
+    schemaMappings: registry,
+    direction: "pouch-to-orm",
+});
+```
+
+### Handling Type Inheritance
+
+When a PouchDB document type has custom fields beyond the base `Entity` (e.g., `HolidayHome` extends `Entity` with
+`homeName`, `parkRef`, `capacity`), the SchemaMapping handles this through field transforms. No special inheritance
+mechanism is needed — base fields pass through, specific fields get mapped:
+
+```typescript
+const registry = new SchemaMappingRegistry([
+    {
+        key: "HolidayHome",
+        pouchDocTypes: ["holidayHome"],
+        ormEntityName: "HolidayHomeEntity",
+        forward: {
+            fieldTransforms: [
+                {sourceField: "homeName", targetField: "name"},
+                {sourceField: "parkRef", targetField: "parkId"},
+                // capacity, createdDate, updatedDate pass through unchanged
+            ],
+        },
+    },
+]);
+```
+
+### Sub-Document Extraction
+
+When a PouchDB document contains embedded arrays of sub-objects that should be separate tables in SQLite:
+
+```typescript
+const registry = new SchemaMappingRegistry([
+    {
+        key: "HolidayHome",
+        pouchDocTypes: ["holidayHome"],
+        ormEntityName: "HolidayHomeEntity",
+        subDocuments: [
+            {
+                sourceField: "circuits",
+                targetEntityType: "Circuit",
+                foreignKeyField: "holidayHomeId",
+                fieldTransforms: [
+                    {sourceField: "name", targetField: "circuitName"},
+                    {sourceField: "voltage", targetField: "ratedVoltage"},
+                ],
+            },
+        ],
+    },
+]);
+
+const pump = new DataMigrationPump({
+    entityTypes: [{
+        entityType: "HolidayHome",
+        sourceDAO,
+        targetDAO,
+        schemaMappingKey: "HolidayHome",
+        subDocumentDAOs: new Map([
+            ["Circuit", circuitDAO],
+        ]),
+    }],
+    schemaMappings: registry,
+    direction: "pouch-to-orm",
+});
+```
+
+### Multiple docTypes → One Entity
+
+A common pattern: both "tester" and "tester_legacy" PouchDB docTypes should map to the `Tester` entity:
+
+```typescript
+{
+    key: "Tester",
+    pouchDocTypes: ["tester", "tester_legacy"],
+    ormEntityName: "TesterEntity",
+}
+```
+
+### Built-in Converters
+
+| Name              | Description                              |
+|-------------------|------------------------------------------|
+| `stringToDate`    | ISO date string → `Date` object           |
+| `dateToString`    | `Date` object → ISO date string           |
+| `stringToNumber`  | Numeric string → `number`                 |
+| `stringToBoolean` | `"true"`/`"false"` → `boolean`            |
+
+Custom converters can be provided as functions in `FieldTransformSpec.convert`.
+
+### Bidirectional Round-Trip
+
+For rollback or dual-write scenarios, the SchemaMapping supports full round-trip fidelity:
+
+```typescript
+// Phase 1: PouchDB → SQLite
+const forwardPump = new DataMigrationPump({
+    entityTypes: [{...sourceDAO: pouch, targetDAO: orm, schemaMappingKey: "User"}],
+    schemaMappings: registry,
+    direction: "pouch-to-orm",
+});
+await forwardPump.run();
+
+// Phase 2: SQLite → PouchDB (reverse)
+const reversePump = new DataMigrationPump({
+    entityTypes: [{...sourceDAO: orm, targetDAO: pouch, schemaMappingKey: "User"}],
+    schemaMappings: registry,
+    direction: "orm-to-pouch",
+});
+await reversePump.run();
+// Data is back in PouchDB with original field names
+```
+
+## MigrationOptions Reference
+
+| Field                | Type                  | Default     | Description                              |
+|----------------------|-----------------------|-------------|------------------------------------------|
+| `entityTypes`        | `EntityTypeTransform[]` | —         | Per-entity configuration (required)      |
+| `batchSize`          | `number`              | `100`       | Records per batch                         |
+| `dryRun`             | `boolean`             | `false`     | Transform only, no loading                |
+| `onError`            | `"abort"|"skip"|"retry"` | `"abort"` | Error strategy                           |
+| `maxRetries`         | `number`              | `3`         | Retry attempts (when `onError="retry"`)  |
+| `migrateSince`       | `Date`                | —           | Only migrate records updated after this  |
+| `rollbackOnFailure`  | `boolean`             | `true`      | Delete loaded records on failure          |
+| `schemaMappings`     | `SchemaMappingRegistry` | —         | Type-aware mapping registry (optional)   |
+| `direction`          | `MigrationDirection`  | inferred    | "pouch-to-orm" or "orm-to-pouch"        |
+
+## MigrationResult Reference
+
+| Field                | Type      | Description                              |
+|----------------------|-----------|------------------------------------------|
+| `success`            | `boolean` | True if no errors and no rollback        |
+| `dryRun`             | `boolean` | Whether this was a dry run               |
+| `totalSourceRecords` | `number`  | Total records found in source            |
+| `totalMigrated`      | `number`  | Total records successfully loaded        |
+| `totalFailed`        | `number`  | Total records that failed                |
+| `totalWarnings`      | `number`  | Total warnings generated                 |
+| `entityResults`      | `EntityTypeResult[]` | Per-entity breakdown         |
+| `rolledBack`         | `boolean` | Whether rollback was performed           |
+| `rollbackCount`      | `number`  | Records deleted during rollback          |
+| `durationMs`         | `number`  | Total migration time in milliseconds     |
+

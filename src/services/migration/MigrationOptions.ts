@@ -1,5 +1,6 @@
 import {GenericDAO} from "../dao/GenericDAO";
 import {Entity} from "../../model/Entity";
+import {SchemaMapping, SchemaMappingRegistry, MigrationDirection} from "./SchemaMapping";
 
 /**
  * Strategy for handling errors during migration.
@@ -47,6 +48,12 @@ export interface EntityTypeTransform {
 
     /** Joi or similar validation schema (optional, not enforced by the pump itself). */
     validateSchema?: (record: any) => boolean;
+
+    /** SchemaMapping key for type-aware transformation. */
+    schemaMappingKey?: string;
+
+    /** Sub-document DAOs for nested → separate table migrations. Keyed by target entity type. */
+    subDocumentDAOs?: Map<string, GenericDAO<any>>;
 }
 
 /**
@@ -99,13 +106,19 @@ export interface MigrationOptions {
 
     /** If true, rollback (delete) already-loaded records on failure when not in dry-run. Default: true. */
     rollbackOnFailure?: boolean;
+
+    /** SchemaMappingRegistry for type-aware, bidirectional transformation. Optional. */
+    schemaMappings?: SchemaMappingRegistry;
+
+    /** Direction of migration. Inferred from DAO types if not specified. */
+    direction?: MigrationDirection;
 }
 
 /**
  * Provides sensible defaults for partial options.
  */
-export function normaliseOptions(options: MigrationOptions): Required<Omit<MigrationOptions, "migrateSince" | "onProgress" | "sourceDAO" | "targetDAO">> &
-    Pick<MigrationOptions, "migrateSince" | "onProgress" | "sourceDAO" | "targetDAO"> {
+export function normaliseOptions(options: MigrationOptions): Required<Omit<MigrationOptions, "migrateSince" | "onProgress" | "sourceDAO" | "targetDAO" | "schemaMappings" | "direction">> &
+    Pick<MigrationOptions, "migrateSince" | "onProgress" | "sourceDAO" | "targetDAO" | "schemaMappings" | "direction"> {
 
     const seen = new Set<string>();
     for (const et of options.entityTypes) {
@@ -126,5 +139,7 @@ export function normaliseOptions(options: MigrationOptions): Required<Omit<Migra
         onProgress: options.onProgress,
         migrateSince: options.migrateSince,
         rollbackOnFailure: options.rollbackOnFailure ?? true,
+        schemaMappings: options.schemaMappings,
+        direction: options.direction,
     };
 }
