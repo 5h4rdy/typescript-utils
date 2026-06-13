@@ -111,7 +111,7 @@ describe("DAO Pluggability — PouchDB vs TypeORM", () => {
 
     it("TypeORM backend passes the full CRUD exercise", async () => {
         const ds = new DataSource({
-            type: "sqlite",
+            type: "better-sqlite3",
             database: ":memory:",
             entities: [GenericOrmDoc, OrmCounter, UserOrmDoc],
             synchronize: true,
@@ -158,7 +158,7 @@ describe("DAOFactory", () => {
 
     it("creates a working TypeORM DAO from config", async () => {
         const ds = new DataSource({
-            type: "sqlite",
+            type: "better-sqlite3",
             database: ":memory:",
             entities: [GenericOrmDoc, OrmCounter, UserOrmDoc],
             synchronize: true,
@@ -244,7 +244,7 @@ describe("Transactions work identically across backends", () => {
 
     it("TypeORM: rollback undoes a create", async () => {
         const ds = new DataSource({
-            type: "sqlite",
+            type: "better-sqlite3",
             database: ":memory:",
             entities: [GenericOrmDoc, OrmCounter, UserOrmDoc],
             synchronize: true,

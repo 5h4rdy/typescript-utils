@@ -35,7 +35,7 @@ describe("TransactionManager", () => {
 
     it("creates a TypeORMTransactionWrapper for ORM DAOs", async () => {
         const ds = new DataSource({
-            type: "sqlite",
+            type: "better-sqlite3",
             database: ":memory:",
             entities: [GenericOrmDoc, OrmCounter, SimpleOrmDoc],
             synchronize: true,
@@ -147,7 +147,7 @@ describe("TypeORMTransactionWrapper", () => {
 
     beforeEach(async () => {
         dataSource = new DataSource({
-            type: "sqlite",
+            type: "better-sqlite3",
             database: ":memory:",
             entities: [GenericOrmDoc, OrmCounter, SimpleOrmDoc],
             synchronize: true,
