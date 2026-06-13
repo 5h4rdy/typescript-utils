@@ -29,7 +29,7 @@ describe('GenericOrmMapper', () => {
             } as GenericOrmDoc;
 
             // Expect an error to be thrown
-            expect(() => (new GenericOrmMapper()).toDomain(ormDoc)).toThrowError(
+            expect(() => (new GenericOrmMapper()).toDomain(ormDoc)).toThrow(
                 'Unable to map object with properties ID'
             );
         });
@@ -42,7 +42,7 @@ describe('GenericOrmMapper', () => {
             } as GenericOrmDoc;
 
             // Expect an error to be thrown
-            expect(() => (new GenericOrmMapper()).toDomain(ormDoc)).toThrowError(
+            expect(() => (new GenericOrmMapper()).toDomain(ormDoc)).toThrow(
                 'Unable to map object with properties ID'
             );
         });

@@ -20,7 +20,7 @@ describe('GenericOrmDAO', () => {
 
     beforeEach(async () => {
         dataSource = new DataSource({
-            type: 'sqlite',
+            type: 'better-sqlite3',
             database: ':memory:',
             entities: [GenericOrmDoc, OrmCounter, ExampleDoc],
             synchronize: true
@@ -146,7 +146,7 @@ describe('GenericOrmDAO with Transactions', () => {
 
     beforeEach(async () => {
         dataSource = new DataSource({
-            type: 'sqlite',
+            type: 'better-sqlite3',
             database: ':memory:',
             entities: [GenericOrmDoc, ExampleDoc],
             synchronize: true

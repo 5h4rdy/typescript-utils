@@ -25,7 +25,7 @@ export class GenericOrmDAO<D extends GenericOrmDoc> implements GenericDAO<D> {
         if (this.entityManager.queryRunner) {
             return this.entityManager.queryRunner
         } else {
-            return this.entityManager.connection.createQueryRunner();
+            return this.entityManager.dataSource.createQueryRunner();
         }
     }
 
