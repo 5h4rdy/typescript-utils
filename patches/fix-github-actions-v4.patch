@@ -1,0 +1,78 @@
+From dba8885c2f02aa9e0b4a5afce60437b4dc1d78f2 Mon Sep 17 00:00:00 2001
+From: Stuart Hardy <stuart@hardysfarm.co.uk>
+Date: Sun, 14 Jun 2026 07:42:42 +0100
+Subject: [PATCH] fix: upgrade deprecated GitHub Actions to v4 (checkout,
+ setup-node, upload-artifact)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The release workflow failed because actions/upload-artifact@v2 is fully
+deprecated and blocked by GitHub. Also bumped checkout@v2→v4,
+setup-node@v2/v3→v4, Node 18→20, npm install→npm ci for reproducibility.
+---
+ .github/workflows/npm-test.yml |  8 ++++----
+ .github/workflows/release.yaml | 14 +++++++-------
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/.github/workflows/npm-test.yml b/.github/workflows/npm-test.yml
+index 76a636d..ecac721 100644
+--- a/.github/workflows/npm-test.yml
++++ b/.github/workflows/npm-test.yml
+@@ -16,15 +16,15 @@ jobs:
+ 
+     strategy:
+       matrix:
+-        node-version: [ 18.x ]
++        node-version: [ 20.x ]
+         # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
+ 
+     steps:
+-      - uses: actions/checkout@v3
++      - uses: actions/checkout@v4
+       - name: Use Node.js ${{ matrix.node-version }}
+-        uses: actions/setup-node@v3
++        uses: actions/setup-node@v4
+         with:
+           node-version: ${{ matrix.node-version }}
+           cache: 'npm'
+-      - run: npm install
++      - run: npm ci
+       - run: npm test
+diff --git a/.github/workflows/release.yaml b/.github/workflows/release.yaml
+index 978b2e0..c012757 100644
+--- a/.github/workflows/release.yaml
++++ b/.github/workflows/release.yaml
+@@ -11,22 +11,22 @@ jobs:
+ 
+     steps:
+       - name: Checkout code
+-        uses: actions/checkout@v2
++        uses: actions/checkout@v4
+ 
+       - name: Use Node.js
+-        uses: actions/setup-node@v2
++        uses: actions/setup-node@v4
+         with:
+-          node-version: '18'
++          node-version: '20'
+ 
+       - name: Install Dependencies
+-        run: npm install
++        run: npm ci
+ 
+       - name: Build
+-        run: npm run build  # Assumes you have a "build" script in your package.json
++        run: npm run build
+ 
+       - name: Upload Build Artifacts
+-        uses: actions/upload-artifact@v2
++        uses: actions/upload-artifact@v4
+         with:
+           name: dist
+-          path: dist/  # Assumes that the build outputs to a "dist" folder
++          path: dist/
+ 
+-- 
+2.39.5
+
